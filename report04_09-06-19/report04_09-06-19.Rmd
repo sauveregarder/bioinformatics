@@ -1,0 +1,510 @@
+---
+title: "New Adjacency Matrix and CEMiTool"
+author: "Filipe Russo"
+date: "June 09, 2019"
+output:
+  pdf_document: default
+  html_document:
+  df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi = 300)
+```
+
+## Our own Adjacency Matrix
+
+The use of the `adjacency` function from the `R` package `WGCNA` takes heavily into account the supposition that biological networks obey a power law, hence all the trouble of finding the soft thresholding power seen previously. We decided to trail a different path with Pearson Correlation and a FDR (False Discovery Rate) correction method so to construct *our own adjacency matrix*.
+
+My fellow researcher at LABIS Rodrigo Dorado developed the code below, it takes our expression data and returns a new adjacency matrix.
+
+```{r}
+library(parallel)
+##source("https://bioconductor.org/biocLite.R")
+##biocLite("qvalue")
+##browseVignettes("qvalue")
+library(qvalue)
+
+## The main function to get the correlations and p_values.
+## initial_matrix matrix The matrix to get the correlations and the p_values.
+## titles array The name of the rows of the matrix.
+## divided int The number of rows to get the correlations in every cluster.
+## opt String Can be parallel or non-parallel.
+## num_cores int The number of cores to execute the parallel option.
+## Rodrigo Dorado
+getCorrelationsPValuesParallel <- function(initial_matrix, 
+                                           titles, 
+                                           divided, 
+                                           opt = "parallel", 
+                                           num_cores = 0) {
+  
+  ## The function to get the correlation and the p_value.
+  ## data_matrix matrix The matrix to get the correlations and the p_values.
+  ## method String The method to use in the corrrelation.
+  ## Rodrigo Dorado
+  cor.P.Values <- function(data_matrix, method="pearson") {
+    P_values              <- matrix(rep(0, ncol(data_matrix) ^ 2),
+                                    nc = ncol(data_matrix), 
+                                    nr = ncol(data_matrix))
+    colnames(P_values)    <- rownames(P_values) <- colnames(data_matrix)
+    correlation           <- matrix(rep(1, ncol(data_matrix) ^ 2), 
+                                    nc = ncol(data_matrix), 
+                                    nr = ncol(data_matrix))
+    colnames(correlation) <- rownames(correlation) <- colnames(data_matrix)
+    for (i in 1:(ncol(data_matrix) - 1)) {
+      for (j in (i + 1):ncol(data_matrix)) {
+        result            <- cor.test(data_matrix[,i], data_matrix[,j], method = method)
+        P_values[i,j]     <- P_values[j,i]    <- result$p.value
+        correlation[i,j]  <- correlation[j,i] <- result$estimate
+      }
+    }
+    return(list("correlation" = correlation, "P_values" = P_values))
+  }
+  
+  ## The main function to get the correlations and p_values in parallel mode.
+  ## i int The divison to execute.
+  ## data matrix All the matrix to get the correlations and p_values.
+  ## options array The part of the principal matrix.
+  ## type String Can be middle or all.
+  ## combi array The posible combinatories of the values in options array.
+  ## Rodrigo Dorado
+  getCorrelationMatrix_parallel <- function(i, data, options, type, combi) {
+    
+    ## The function to get the correlation and the p_value of the same row.
+    ## data_matrix matrix The row to process.
+    ## Rodrigo Dorado
+    cor.P.Values.oneRow <- function (data_matrix){
+      P_values            <- matrix(0, nc = 1, nr = 1)
+      correlation         <- matrix(1, nc = 1, nr = 1)
+      colnames(P_values)  <- rownames(P_values) <- colnames(data_matrix)
+      colnames(correlation) <- colnames(data_matrix)
+      rownames(correlation) <- colnames(data_matrix)
+      return(list("correlation" = correlation, "P_values" = P_values))
+    }
+    
+    ## The function to get the correlation and the p_value.
+    ## data_matrix matrix The matrix to get the correlations and the p_values.
+    ## type String Can be middle or all.
+    ## divideSize int The division to get only one part of the result.
+    ## method String The method to use in the corrrelation.
+    ## Rodrigo Dorado
+    cor.P.Values <- function(data_matrix, type, divideSize, method = "pearson") {
+      P_values              <- matrix(rep(0, ncol(data_matrix) ^ 2), 
+                                      nc = ncol(data_matrix), 
+                                      nr = ncol(data_matrix))
+      colnames(P_values)    <- rownames(P_values)     <- colnames(data_matrix)
+      correlation           <- matrix(rep(1, ncol(data_matrix) ^ 2), 
+                                      nc = ncol(data_matrix), 
+                                      nr = ncol(data_matrix))
+      colnames(correlation) <- rownames(correlation)  <- colnames(data_matrix)
+      for (i in 1:(ncol(data_matrix) - 1)) {
+        for (j in (i + 1):ncol(data_matrix)) {
+          result            <- cor.test(data_matrix[,i], data_matrix[,j], method = method)
+          P_values[i,j]     <- P_values[j,i] <- result$p.value
+          correlation[i,j]  <- correlation[j,i] <- result$estimate
+        }
+      }
+      if (type == 'middle') {
+        return(list("correlation" = correlation, "P_values" = P_values))
+      }
+      if (type == 'all') {
+        size <- nrow(correlation)
+        return(list("correlation_inf" = correlation[(divideSize + 1) : size, 
+                                                    1 : divideSize],
+                    "P_values_inf" = P_values[(divideSize + 1) : size,
+                                              1 : divideSize],
+                    "correlation_sup" = correlation[1 : divideSize,
+                                                    (divideSize + 1) : size], 
+                    "P_values_sup" = P_values[1 : divideSize, 
+                                              (divideSize + 1) : size]))
+      }
+    }
+    
+    cor <- NULL
+    if (type == 'middle') {
+      x <- options[i,'values_ini']
+      y <- options[i,'values_fin']
+      if (x == y) {
+        cor <- cor.P.Values.oneRow(t(data[x:y,]))
+      } else {
+        cor <- cor.P.Values(t(data[x:y,]), type) 
+      }
+    }
+    if (type == 'all') {
+      combi1    <- combi[i,1]
+      combi2    <- combi[i,2]
+      x1        <- options[combi1,'values_ini']
+      y1        <- options[combi1,'values_fin']
+      x2        <- options[combi2,'values_ini']
+      y2        <- options[combi2,'values_fin']
+      division  <- (y1 - x1) + 1
+      cor       <- cor.P.Values(t(data[c(x1:y1, x2:y2),]), type, division)
+    }
+    return(cor)
+  }
+  
+  ## Get the entire result matrix of all the results got of the parallel function.
+  ## rowsNumber int Number of rows in the data matrix.
+  ## titles The row names of the data Matrix.
+  ## options array The part of the principal matrix.
+  ## middleTable matrix The results of the middle part of the entire result.
+  ## boundTable matrix The results of the combinatories betwwen the options.
+  ## option_parallel boolena If exists middle part.
+  ## Rodrigo Dorado
+  getResultMatrix <- function(rowsNumber, 
+                              titles, 
+                              options, 
+                              middleTable, 
+                              boundTable, 
+                              option_parallel = TRUE) {
+    Result              <- matrix(NA, nrow = rowsNumber, ncol = rowsNumber)
+    Result_p            <- matrix(NA, nrow = rowsNumber, ncol = rowsNumber)
+    row.names(Result)   <- titles
+    colnames(Result)    <- titles
+    row.names(Result_p) <- titles
+    colnames(Result_p)  <- titles
+    if(option_parallel) {
+      for(i in 1:nrow(options) ) {
+        x                   <- options[i, "values_ini"]
+        y                   <- options[i, "values_fin"]
+        Result[x:y, x:y]    <- middleTable[[i]]$correlation
+        Result_p[x:y, x:y]  <- middleTable[[i]]$P_values
+      } 
+    }
+    for(i in 1:nrow(combinatorias) ) {
+      comb1                   <- combinatorias[i, 1]
+      comb2                   <- combinatorias[i, 2]
+      x1                      <- options[comb1, "values_ini"]
+      y1                      <- options[comb1, "values_fin"]
+      x2                      <- options[comb2, "values_ini"]
+      y2                      <- options[comb2, "values_fin"]
+      Result[x1:y1, x2:y2]    <- boundTable[[i]]$correlation_sup
+      Result[x2:y2, x1:y1]    <- boundTable[[i]]$correlation_inf
+      Result_p[x1:y1, x2:y2]  <- boundTable[[i]]$P_values_sup
+      Result_p[x2:y2, x1:y1]  <- boundTable[[i]]$P_values_inf
+    }
+    return(list("correlation" = Result, "p_values" = Result_p))
+  }
+  
+  if(nrow(initial_matrix) < divided) {
+    return(list("Error" = "Can not divide the matrix in a big nuber of the rows."))
+  }
+  init_time                 <- Sys.time()
+  row.names(initial_matrix) <- titles
+  rowsNumber                <- nrow(initial_matrix)
+  n                         <- ceiling(rowsNumber / divided)
+  initial_values            <- c()
+  final_values              <- c()
+  for(i in 1:n) {
+    ini <- 1 + (divided * (i - 1))
+    fin <- divided * i
+    if (fin > rowsNumber) {
+      fin <- rowsNumber
+    }
+    initial_values  <- c(initial_values, ini)
+    final_values    <- c(final_values, fin)
+  }
+  options       <- data.frame(option = 1:n, 
+                              values_ini = initial_values, 
+                              values_fin = final_values)
+  combinatorias <- t(combn(n, 2))
+  comb_number   <- nrow(combinatorias)
+  if(opt == "parallel") {
+    ###parallel###
+    option_parallel <- FALSE
+    middleTable     <- c()
+    total_cores     <- detectCores() - 1
+    if(num_cores < 1) {
+      num_cores <- total_cores
+    }
+    if(num_cores > total_cores) {
+      num_cores <- total_cores
+    }
+    cl <- makeCluster(num_cores)
+    if(divided > 1) {
+      option_parallel <- TRUE
+      middleTable     <- parLapply(cl, 
+                                   1:n, 
+                                   getCorrelationMatrix_parallel, 
+                                   initial_matrix, 
+                                   options, 
+                                   'middle')
+    }
+    boundTable <- parLapply(cl, 
+                            1:comb_number, 
+                            getCorrelationMatrix_parallel, 
+                            initial_matrix, 
+                            options, 
+                            'all', 
+                            combinatorias)
+    stopCluster(cl)
+    result <- getResultMatrix(rowsNumber, 
+                              titles, 
+                              options, 
+                              middleTable, 
+                              boundTable, 
+                              option_parallel)
+    fin_time <- Sys.time()
+    config <- list("number_cores" = num_cores, 
+                   "time" = fin_time - init_time, 
+                   "init_time" = init_time, 
+                   "finish_time" = fin_time)
+    result$correlation[is.na(result$correlation)] <- 1
+    result$p_values[is.na(result$p_values)]       <- 0
+    return(list("correlation" = result$correlation, 
+                "p_values" = result$p_values, 
+                "config" = config)) 
+    ###parallel###
+  } else {
+    if(opt == "non-parallel"){
+      ###NonParallel###
+      result    <- cor.P.Values(t(initial_matrix))
+      fin_time  <- Sys.time()
+      config    <- list("number_cores" = NA, 
+                        "time" = fin_time - init_time, 
+                        "init_time" = init_time, 
+                        "finish_time" = fin_time)
+      return(list("correlation" = result$correlation, 
+                  "p_values" = result$P_values, 
+                  "config" = config)) 
+      ###NonParallel###
+    }else{
+      return(list("Error" = "Option does not exists."))
+    }
+  }
+}
+
+## Get the q_values and the new correlation.
+## correlation matrix The original correlation matrix.
+## P_values matrix The original p_values matrix.
+## NaNFDRValue int, String, NA, NULL 
+## The value to put to the values that does not accomplished the comparation.
+## comparation Double The value to comparate
+## lambda int The lambda option of the qvalue function.
+## Rodrigo Dorado
+executeFDR <- function(correlation, 
+                       P_values, 
+                       NaNFDRValue = 0, 
+                       comparation = 0.05, 
+                       lambda = 0) {
+  N                         <- nrow(correlation)
+  M                         <- 2
+  newCorrelation            <- matrix(NA, nc = N, nr = N)
+  colnames(newCorrelation)  <- rownames(newCorrelation) <- colnames(correlation)
+  q_value_result            <- qvalue(p = P_values, lambda = lambda)
+  for (i in (1:N)) {
+    newCorrelation[i,i] <- correlation[i,i]
+    if (M <= N) {
+      for (j in (M:N)){
+        result <- correlation[i,j]
+        if (q_value_result$qvalues[i,j] > comparation) {
+          result <- NaNFDRValue
+        }
+        newCorrelation[j,i] <- newCorrelation[i,j] <- result
+      }
+      M <- M + 1
+    }
+  }
+  return(list("newCorrelation" = newCorrelation, "qvalues" = q_value_result$qvalues))
+}
+
+datExprA <- read.csv("datExprA2.csv", sep = ",", header = TRUE)
+rownames(datExprA) = datExprA$X
+datExprA <- datExprA[ , -c(1)]
+data <- t(datExprA)
+
+resultProt        <- getCorrelationsPValuesParallel(data, 
+                                                    rownames(data), 
+                                                    10, 
+                                                    "parallel", 
+                                                    7)
+resultCorrelation <- executeFDR(resultProt$correlation, resultProt$p_values)
+adjMat <- resultCorrelation$newCorrelation
+```
+
+## Topological Overlap Matrix
+
+Now we pass our `adjMat` adjacency matrix to the `TOMsimilarity` function from the `R` package `WGCNA` and go on with the analysis just as we did in the previous report.
+
+```{r warning = FALSE,  message = FALSE, results = FALSE}
+library(WGCNA)
+```
+
+```{r warning = FALSE,  message = FALSE}
+# Turns adjMat matrix into TOM matrix 
+TOM = TOMsimilarity(adjMat = adjMat, TOMType = "signed")
+dissTOM = 1 - TOM
+
+# Call the hierarchical clustering function
+geneTree = hclust(as.dist(dissTOM), method = "average")
+geneTree$labels = names(datExprA)
+
+# Plot the resulting clustering tree (dendrogram)
+plot(geneTree, xlab = "", sub = "", 
+     main = "Protein clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04)
+
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 10
+
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, 
+                            distM = dissTOM,
+                            deepSplit = 2, 
+                            pamRespectsDendro = FALSE,
+                            minClusterSize = minModuleSize)
+table(dynamicMods)
+
+# Convert numeric lables into colors
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+
+# Plot the dendrogram and colors underneath
+plotDendroAndColors(geneTree, 
+                    dynamicColors, 
+                    "Dynamic Tree Cut",
+                    dendroLabels = FALSE, 
+                    hang = 0.03,
+                    addguide = TRUE, 
+                    guideHang = 0.05,
+                    main = "Protein dendrogram and module colors")
+```
+
+The `cutreeDynamic` function returns our 600 proteins in a 4 modules partition. Note how large is the grey module, it represents a collection of uncorrelated proteins that couldn't be grouped together elsewhere. 
+
+For the next step we try to merge modules with an intermodule correlation of at least 0.75.
+
+```{r warning = FALSE,  message = FALSE}
+# Calculate eigengenes
+MEList = moduleEigengenes(datExprA, colors = dynamicColors)
+MEs = MEList$eigengenes
+
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1 - cor(MEs);
+
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = "average")
+
+# Plot the result
+plot(METree, 
+     main = 
+     "Clustering of module eigengenes (dissimilarity tree: 1 - cor(MEs))",
+     xlab = "", 
+     sub = "")
+
+# Correlation of at least 0.75 necessary to merge modules
+MEDissThres = 0.25
+
+# Plot the cut line into the dendrogram
+abline(h = MEDissThres, col = "red")
+abline(h = 2, col = "blue")
+abline(h = 1.5, col = "blue")
+abline(h = 1, col = "blue")
+abline(h = 0.5, col = "blue")
+abline(h = 0, col = "blue")
+
+# Call an automatic merging function
+merge = mergeCloseModules(datExprA, 
+                          dynamicColors, 
+                          cutHeight = MEDissThres, 
+                          verbose = 3)
+
+# The merged module colors
+mergedColors = merge$colors
+
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs
+
+# Plot the comparision between Dynamic Tree Cut and Merged Dynamic
+plotDendroAndColors(geneTree, 
+                    cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, 
+                    hang = 0.03,
+                    addguide = TRUE, 
+                    guideHang = 0.05)
+
+# Rename to moduleColors
+moduleColors = mergedColors
+table(mergedColors)
+
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50))
+moduleLabelsDynamic = match(dynamicColors, colorOrder) - 1
+MEs = mergedMEs
+
+moduleLabelsMerged = match(mergedColors, colorOrder) - 1
+
+library(clues)
+adjustedRand(moduleLabelsDynamic, moduleLabelsMerged)
+
+Partition_C <- dynamicColors
+```
+
+From the result of the `adjustedRand` function from the `R` package `clues` we confirm what the plots already indicate: the Dynamic Tree Cut partition is equal to the Merged dynamic one. We stored this partition in the `Partition_C` variable. 
+
+## Rand Index: Partition_B & Partition_C
+
+Now, we will compare the `Partition_B` constructed in the previous report with the `Partition_C` constructed in this one.
+
+```{r warning = FALSE,  message = FALSE}
+proteins <- read.csv("proteins.csv", sep = ",", header = TRUE)
+Partition_B <- proteins$Partition_B
+# remember we use their numeric labelled counterparts for the adjustedRand() function
+adjustedRand(match(Partition_B, colorOrder) - 1, moduleLabelsDynamic)
+```
+
+Our Hubert–Arabie Adjusted Rand Index was 0.03604860, which according to the heuristics proposed by the researcher Douglas Steinly means a poor recovery. So the `Partition_B` comprised of the 600 proteins grouped in 4 modules can be consired very different from the `Partition_C` comprised of the 600 proteins grouped in 4 modules. 
+
+## CEMiTool
+
+*CEMiTool* (Co-Expression Modules identification Tool) is a systems biology method that easily identifies co-expression gene modules in a fully automated manner. We will give it a try with our proteomics data.
+
+```{r warning = FALSE,  message = FALSE}
+library(CEMiTool)
+library(dplyr)
+
+# loading the data
+proteomics <- read.csv("datExprA.csv", sep = ",", header = TRUE)
+rownames(proteomics) = proteomics$X
+proteomics <- proteomics[ , -c(1)]
+
+# preparing the data
+test <- t(proteomics)
+test <- as.data.frame(test)
+ids <- rownames(test)
+test <- test %>% mutate(ID = ids)
+test <- test[, c(10, 1:9)]
+
+# using the cemitool function
+cem <- cemitool(test[, -c(1)])
+cem
+```
+
+By running our `test` in *CEMiTool* on `R` and [online](https://cemitool.sysbio.tools/analysis), we get the same result: "No beta value found. It seems that the soft thresholding approach used by CEMiTool is not suitable for your data.". The tool developers further explain:
+
+"The beta value is a parameter that lies in the core of the weighted gene co-expression network analysis (WGCNA). Originally, this parameter needed to be defined by the user. Therefore, the original CEMiTool R package implemented an automatic beta value selection procedure that uses the gene expression data to select the best value on behalf of the user. In some cases, however, the CEMiTool automatic procedure fails to find the best solution and cannot keep on with the co-expression analysis and this error is raised."
+
+Our proteomics dataset differs sensibly from the dataset shown in *CEMiTool*'s tutorial. Their dataset is comprised of 25498 genes across 81 samples, while our (uncleaned) dataset is comprised of 757 proteins across 9 samples. That's probably what is interfering with the auto-detection of the beta value (soft thresholding power).
+
+Let's take a look when *CEMiTool* runs properly:
+
+```{r warning = FALSE,  message = FALSE}
+tutorial <- read.csv("cemitool-expression.tsv", sep = "\t", header = TRUE)
+cem2 <- cemitool(tutorial[, -c(1)])
+glimpse(cem2@module)
+table(cem2@module$modules)
+```
+
+We see the `tutorial` dataset comprised of 25498 genes across 81 samples was turned into a 763 genes Partition grouped in 7 modules, where 131 of said genes are not correlated. It means only 3% of the original genes were actually used in the network. If it had worked with our `proteomics` dataset in the same proportion as it did with the `tutorial` dataset we would have had a network with roughly 23 proteins and probably no more than one module.
+
+## Saving the Data
+
+Finally, we store the `Partition_C` variable in our `proteins` dataframe, which we save for further analysis.
+
+```{r warning = FALSE,  message = FALSE, results = FALSE}
+proteins <- read.csv("proteins.csv", sep = ",", header = TRUE)
+proteins <- proteins %>% mutate(Partition_C = Partition_C)
+write.csv(proteins, file = "proteins.csv", row.names = FALSE)
+proteins <- read.csv("proteins.csv", sep = ",", header = TRUE)
+```

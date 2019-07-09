@@ -1,0 +1,400 @@
+---
+title: "A First Look at the Triplicates & Model Fitting"
+author: "Filipe Russo"
+date: "March 24, 2019"
+output:
+  pdf_document: default
+  html_document:
+  df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi = 300)
+```
+
+## Introduction
+
+Our aim is to prepare the Proteomics dataset of the microalgae Chrorella vulgaris in such a way that we can construct a network of co-expressed proteins. For this objective we chose to adapt the `R` package `WGCNA` (Weighted Gene Co-expression Network Analysis), we need it to work with proteins instead of genes.
+
+## Loading & Cleaning
+
+First, we load our original dataset `proteinGroups.txt`, store it in the variable `Proteins` and do some previous seen cleanup:
+
+```{r warning = FALSE,  message = FALSE, results = FALSE}
+library(dplyr) # for data manupilation
+library(stringr) # for string manipulation
+library(WGCNA) # load the WGCNA package
+library(tidyr) # for spread function (long to wide)
+
+# The following setting is important for WGCNA, do not omit.
+options(stringsAsFactors = FALSE)
+
+# little nice function to check if an element IS NOT in a list
+'%ni%' <- Negate('%in%')
+
+# 1.a Loading Expression Data
+
+Proteins = read.csv("proteinGroups.txt", sep = "\t", header=TRUE)
+
+names(Proteins) <- str_replace(names(Proteins), 
+                               pattern = "MixoTP4", 
+                               replacement = "MixoTP6")
+names(Proteins) <- str_replace(names(Proteins), 
+                               pattern = "HeteTP4", 
+                               replacement = "HeteTP10")
+
+# we define positive identifiers for the Reverse, 
+# Only.identified.by.site 
+# and Potential.contaminant columns
+rev_posids = list("+") 
+site_posids = list("+") 
+cont_posids = list("+")
+
+clean_proteins <- Proteins %>%
+  
+  # filters out rows based on posids of rev, site and cont
+  # filters out rows based on the protein IDs, names with CON or REV
+  filter(Reverse %ni% rev_posids & 
+         Only.identified.by.site %ni% site_posids & 
+         Potential.contaminant %ni% cont_posids & 
+         !str_detect(Majority.protein.IDs, "CON|REV")) %>%
+  
+  # keeps only the ids and the LFQ columns
+  select(c("Majority.protein.IDs", str_subset(names(Proteins), "LFQ"))) %>%
+  rename(ID = Majority.protein.IDs)
+```
+
+## Hierarchical Clustering
+
+Through *Hierarchical Clustering* we will be able to cluster our triplicates and visualize sample outliers among them.
+
+```{r}
+# removes the ID column, transposes the clean_proteins dataframe and 
+# then it turns the matrix back to a data.frame class object
+datExprA = as.data.frame(t(clean_proteins[, -c(1:1)])) 
+
+# picks the protein ids from clean_proteins ID column and 
+# stores it as column names in the datExprA data.frame
+names(datExprA) = clean_proteins$ID 
+
+# picks the triplicate names stored in the clean_proteins columns and 
+# saves them as row names from datExprA
+rownames(datExprA) = names(clean_proteins)[-c(1:1)] 
+
+# 1.b Checking data for excessive missing values and 
+# Identification of outlier microarray samples
+
+gsg = goodSamplesGenes(datExprA, verbose = 3);
+gsg$allOK
+
+if (!gsg$allOK)
+{
+  # Optionally, print the gene and sample names that were removed:
+  if (sum(!gsg$goodGenes)>0)
+    printFlush(paste("Removing proteins:", paste(names(datExprA)[!gsg$goodGenes], 
+                                                 collapse = ", ")));
+  if (sum(!gsg$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(datExprA)[!gsg$goodSamples], 
+                                                collapse = ", ")));
+  
+  # Remove the offending genes and samples from the data:
+  datExprA = datExprA[gsg$goodSamples, gsg$goodGenes]
+}
+
+# Clustering dendrogram of samples based on their Euclidean distance
+sampleTree1 = hclust(dist(datExprA), method = "average");
+
+# pdf(file = "sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree1, 
+     main = "Sample Hierarchical Clustering to detect outliers", 
+     sub = "", 
+     xlab = "", 
+     cex.lab = 1.5,
+     cex.axis = 1.5, 
+     cex.main = 2)
+```
+
+It seems the sample HeteTP10R1 is an outlier. We suppose this happened due to the zeros found in some LFQ intensities, some represent true zeros and others represent missing values. We want the samples to be clustered in 3 different clusters: Auto, Mixo, Hete; lets see how the `cutree` function handles it.
+
+```{r}
+cutree(sampleTree1, k = 3)
+```
+
+The result suggests the sample AutoTP2R1 is an outlier among the AutoTP2 replicates and the growth conditions Heterotrophic and Mixotrophic seem to be more similar to each other than to the Autotrophic one. 
+
+Lets remove the Autotrophic growth condition from the data.frame and see how `hclust` and `cutree` handle the samples:
+
+```{r}
+# Clustering dendrogram of samples based on their Euclidean distance
+sampleTree2 = hclust(dist(datExprA[-c(1:3), ]), method = "average");
+
+# pdf(file = "sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree2, 
+     main = "Sample Hierarchical Clustering to detect outliers", 
+     sub = "", 
+     xlab = "", 
+     cex.lab = 1.5,
+     cex.axis = 1.5, 
+     cex.main = 2)
+
+cutree(sampleTree2, k = 2)
+```
+
+As expected the HeteTP10R1 sample seems to be an outlier, lets remove it and redo the process:
+
+```{r}
+# Clustering dendrogram of samples based on their Euclidean distance
+sampleTree3 = hclust(dist(datExprA[-c(1:4), ]), method = "average");
+
+# pdf(file = "sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree3, 
+     main = "Sample Hierarchical Clustering to detect outliers", 
+     sub = "", 
+     xlab = "", 
+     cex.lab = 1.5,
+     cex.axis = 1.5, 
+     cex.main = 2)
+
+cutree(sampleTree3, k = 2)
+```
+
+Now, the sample MixoTP6R3 seems to be the outlier. Let's remove it, take one last look at this slicing process and move on with the analysis:
+
+```{r}
+# Clustering dendrogram of samples based on their Euclidean distance
+sampleTree4 = hclust(dist(datExprA[-c(1:4, 9), ]), method = "average");
+
+# pdf(file = "sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree4, 
+     main = "Sample Hierarchical Clustering to detect outliers", 
+     sub = "", 
+     xlab = "", 
+     cex.lab = 1.5,
+     cex.axis = 1.5, 
+     cex.main = 2)
+
+cutree(sampleTree4, k = 2)
+```
+
+The last result seemed somewhat better than the previous ones, since we could in fact properly cluster the samples.
+
+We will try to improve these results by taking the median value among the triplicates as the best estimative of the true LFQIntensity value.
+
+
+```{r}
+# we already took the median value in the previous report,
+# so now we only load the data and redo the clustering
+
+valid_proteins_long <- read.csv("proteins.csv", sep = ",", header = TRUE)
+valid_proteins_wide <- valid_proteins_long %>% select(-Time) %>%
+  spread(Growth, MedLFQ)
+
+# removes the ID column, transposes the valid_proteins_wide dataframe and 
+# then it turns the matrix back to a data.frame class object
+datExprA2 = as.data.frame(t(valid_proteins_wide[, -c(1:1)])) 
+
+# picks the protein ids from valid_proteins_wide ID column and 
+# stores it as column names in the datExprA2 data.frame
+names(datExprA2) = valid_proteins_wide$ID 
+
+# picks the triplicate names stored in the valid_proteins_wide columns and 
+# saves them as row names from datExprA2
+rownames(datExprA2) = names(valid_proteins_wide)[-c(1:1)] 
+
+# Clustering dendrogram of samples based on their Euclidean distance
+sampleTree5 = hclust(dist(datExprA2), method = "average");
+
+# pdf(file = "sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree5, 
+     main = "Sample Hierarchical Clustering to detect outliers", 
+     sub = "", 
+     xlab = "", 
+     cex.lab = 1.5,
+     cex.axis = 1.5, 
+     cex.main = 2)
+```
+
+The plot raises the question: Are the Mixotrophic and Heterotrophic growth conditions more similar to each other than to the Autotrophic one?
+
+```{r}
+pairs(valid_proteins_wide[, -1])
+pairs(log(valid_proteins_wide[, -1] + 1))
+```
+
+## Scale Free Topology Model Fit
+
+The `WGCNA package` requires us to pick a soft threshold power to estimate both *model fit* and *mean connectivity*, so we can continue with the network construction.
+
+First, we will work with the `datExprA` data.frame devired from the `clean_proteins` data.frame, which is a cleaned version from the original `Proteins` dataset.
+
+```{r}
+
+# 2.a Automatic network construction and module detection
+
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to = 40, by = 2))
+
+# Call the network topology analysis function
+sft = pickSoftThreshold(datExprA, powerVector = powers, verbose = 5)
+
+# Plot the results:
+cex1 = 0.9;
+
+# We try to grab an automated power estimate from the sft list
+sft$powerEstimate
+
+# sft$powerEstimate is the lowest power for which the scale free topology fit 
+# Rˆ2 exceeds RsquaredCut. If Rˆ2 is below RsquaredCut for all powers, NA is returned.
+
+# Since the function pickSoftThreshold didn't give us a value in
+# the sft$powerEstimate, we have to find by ourselves a value 
+# that is the lowest power for which the scale-free topology fit index curve 
+# flattens out upon reaching a high value
+
+model_fit <- -sign(sft$fitIndices[ , "slope"]) * sft$fitIndices[ , "SFT.R.sq"] 
+mean_con <- sft$fitIndices[ , "mean.k."]
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(powers, 
+     model_fit,
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     type = "n",
+     main = paste("Scale independence"),
+     yaxt = "n")
+
+text(powers, 
+     model_fit,
+     labels = powers, 
+     cex = cex1, 
+     col = "blue")
+
+axis(2, at = seq(-0.1, 0.2, 0.1))
+
+# Model Fit value corresponding to power 16
+abline(h = model_fit[13], col = "red")
+axis(2, at = 0.2878373, labels = c(0.28), col = "red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(powers, 
+     mean_con,
+     xlab = "Soft Threshold (power)",
+     ylab = "Mean Connectivity", 
+     type = "n",
+     main = paste("Mean connectivity"),
+     yaxt = "n")
+
+text(powers, 
+     mean_con, 
+     labels = powers, 
+     cex = cex1,
+     col = "blue")
+
+axis(2, at = seq(50, 250, 50))
+
+# Mean Connectivity value corresponding to power 16
+abline(h = mean_con[13], col = "red")
+axis(2, at = 7.370472, labels = c(7.37), col = "red")
+
+```
+
+As can be seen in the two previous plots we have chosen by visual analysis the Soft Treshold Power 16. The Power 16 gives us a 0.2878373 value for the Model Fit Index.
+
+Now, we will do the same for the `datExprA2` data.frame which is based on the median value among triplicates. Let's take a look:
+
+```{r}
+# 2.a Automatic network construction and module detection
+
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to = 40, by = 2))
+
+# Call the network topology analysis function
+sft2 = pickSoftThreshold(datExprA2, powerVector = powers, verbose = 5)
+
+# Plot the results:
+cex1 = 0.9;
+
+# We try to grab an automated power estimate from the sft2 list
+sft2$powerEstimate
+
+# sft2$powerEstimate is the lowest power for which the scale free topology fit 
+# Rˆ2 exceeds RsquaredCut. If Rˆ2 is below RsquaredCut for all powers, NA is returned.
+
+# Since the function pickSoftThreshold didn't give us a value in
+# the sft2$powerEstimate, we have to find by ourselves a value 
+# that is the lowest power for which the scale-free topology fit index curve 
+# flattens out upon reaching a high value
+
+model_fit2 <- -sign(sft2$fitIndices[ , "slope"]) * sft2$fitIndices[ , "SFT.R.sq"] 
+mean_con2 <- sft2$fitIndices[, "mean.k."]
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(powers, 
+     model_fit2,
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     type = "n",
+     main = paste("Scale independence"),
+     yaxt = "n")
+
+text(powers, 
+     model_fit2,
+     labels = powers, 
+     cex = cex1, 
+     col = "blue")
+
+#axis(2, at = seq(-0.1, 0.2, 0.1))
+
+# Model Fit value corresponding to power 16
+abline(h = model_fit2[13], col = "red")
+axis(2, at = -0.1312341, labels = c(-0.13), col = "red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(powers, 
+     mean_con2,
+     xlab = "Soft Threshold (power)",
+     ylab = "Mean Connectivity", 
+     type = "n",
+     main = paste("Mean connectivity"),
+     yaxt = "n")
+
+text(powers, 
+     mean_con2, 
+     labels = powers, 
+     cex = cex1,
+     col = "blue")
+
+axis(2, at = c(200)) 
+
+# Mean Connectivity value corresponding to power 16
+abline(h = mean_con2[13], col = "red")
+axis(2, at = 133.4083, labels = c(133), col = "red")
+```
+
+Since we couldn't find a good soft-thresholding power for the `datExprA2` data.frame we decided to use the power 16 found for the `datExprA` data.frame. Unfortunately, it gave us a worse fit both graphically and numerically, the Model Fit Index this time was -0.1312341. The results on both data frames were very much influenced by the minimum requirements of `WGCNA` package, according to the [WGCNA FAQ](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/faq.html) one needs at least 15 samples to find results that are not too noisy, it also recommends at least 20 samples for better results.
+
+## Saving our Expression Data
+
+Finally we save our data frames `datExprA` and `datExprA2` for further analysis.
+
+```{r}
+write.csv(datExprA, file = "datExprA.csv", row.names = TRUE)
+datExprA <- read.csv("datExprA.csv", sep = ",", header = TRUE)
+rownames(datExprA) = datExprA$X
+datExprA <- datExprA[ , -c(1)]
+
+write.csv(datExprA2, file = "datExprA2.csv", row.names = TRUE)
+datExprA2 <- read.csv("datExprA2.csv", sep = ",", header = TRUE)
+rownames(datExprA2) = datExprA2$X
+datExprA2 <- datExprA2[ , -c(1)]
+```
